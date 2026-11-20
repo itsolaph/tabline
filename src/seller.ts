@@ -12,8 +12,18 @@
 import { serve } from "@hono/node-server";
 import { Hono } from "hono";
 import { getAddress, type Address } from "viem";
-import { SelfAgentVerifier } from "@selfxyz/agent-sdk";
 import { PRICE_PER_CALL_USD, PORT, MAX_OUTSTANDING_USD } from "./config.js";
+
+/**
+ * Self Agent ID layer is OPTIONAL (env REQUIRE_SELF, default off):
+ * admission then rides on the Altana session key alone — validity +
+ * expiry are read live from the public onchain Keystore, which is the
+ * credit signal for tab terms. Flip REQUIRE_SELF=true to additionally
+ * demand a fresh proof-of-human behind the agent key.
+ */
+const REQUIRE_SELF = process.env.REQUIRE_SELF === "true";
+
+import { SelfAgentVerifier } from "@selfxyz/agent-sdk";
 import {
   checkAltanaKey,
   publicClient,
@@ -67,6 +77,42 @@ async function admit(
   | { ok: false; status: 401 | 402 | 403; body: Record<string, unknown> }
 > {
   const th = readTabHeaders(headers);
+  if (!REQUIRE_SELF) {
+    // Altana-key-only admission: no Self signature required.
+    if (!th.altanaWallet) {
+      return {
+        ok: false,
+        status: 401,
+        body: { error: "missing_tab_headers", hint: "send x-tab-wallet + x-tab-session-key" },
+      };
+    }
+    const altana = await checkAltanaKey(getAddress(th.altanaWallet), th.altanaPubKey);
+    const d = decide(
+      getAddress(th.altanaWallet),
+      tabFor(getAddress(th.altanaWallet)),
+      { isVerified: true, isFresh: true }, // self layer not required
+      altana,
+      Date.now(),
+      bannedNullifiers(),
+      PRICE_PER_CALL_USD,
+      MAX_OUTSTANDING_USD,
+    );
+    if (!d.allow) {
+      return {
+        ok: false,
+        status: 403,
+        body: { error: d.reason },
+      };
+    }
+    return {
+      ok: true,
+      agent: getAddress(th.altanaWallet),
+      altana,
+      self: { isVerified: true, isFresh: true },
+      nullifier: "",
+    };
+  }
+
   if (!th.signature || !th.timestamp) {
     return {
       ok: false,
