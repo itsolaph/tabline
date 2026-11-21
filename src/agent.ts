@@ -1,3 +1,4 @@
+import "dotenv/config";
 /**
  * TAB agent client.
  *
@@ -19,6 +20,7 @@ import {
   signerFromPrivateKey,
   CELO,
   serializeSession,
+  deserializeSession,
   type Session,
 } from "@altananetwork/sdk";
 import { SelfAgent } from "@selfxyz/agent-sdk";
@@ -42,7 +44,11 @@ function loadSession(): Session {
   if (!existsSync(SESSION_PATH)) {
     throw new Error(`no session at ${SESSION_PATH} — run \`setup\` first`);
   }
-  return JSON.parse(readFileSync(SESSION_PATH, "utf8")) as Session;
+  // Stored half has no key material; marry it back to the session signer.
+  return deserializeSession(
+    JSON.parse(readFileSync(SESSION_PATH, "utf8")),
+    signerFromPrivateKey(requireEnv("AGENT_SESSION_KEY") as `0x${string}`),
+  );
 }
 
 function saveSession(session: Session) {
@@ -86,16 +92,23 @@ async function setup(opts: { spendLimitUsd: string; days: string }) {
   );
   const client = newClient();
 
-  // Idempotent: reuse the wallet from a previous session if present,
-  // otherwise create a fresh one under the owner key.
+  // Idempotent: reuse the wallet from a previous run if present.
+  // createWallet is NOT idempotent server-side (each call appends an auth
+  // item, advancing the account's expected nonce) — never repeat it.
   let walletAddress: `0x${string}` | undefined;
-  if (existsSync(SESSION_PATH)) {
+  const walletMemo = ".self/wallet-address.txt";
+  if (existsSync(walletMemo)) {
+    walletAddress = readFileSync(walletMemo, "utf8").trim() as `0x${string}`;
+    console.log(`reusing wallet ${walletAddress}`);
+  } else if (existsSync(SESSION_PATH)) {
     walletAddress = (JSON.parse(readFileSync(SESSION_PATH, "utf8")) as Session)
       .walletAddress as `0x${string}`;
     console.log(`reusing wallet ${walletAddress}`);
   } else {
     const created = await client.createWallet({ signer: ownerSigner });
     walletAddress = created.address as `0x${string}`;
+    mkdirSync(".self", { recursive: true });
+    writeFileSync(walletMemo, walletAddress);
     console.log(`wallet created ${walletAddress}`);
   }
 
@@ -104,6 +117,8 @@ async function setup(opts: { spendLimitUsd: string; days: string }) {
     signer: ownerSigner,
     sessionSigner,
     permissions: {
+      // Only USDT.transfer — the settlement call — and nothing else.
+      calls: [{ to: USDT as `0x${string}`, signature: "transfer(address,uint256)" }],
       spend: [
         { token: USDT as `0x${string}`, limit: usdToBase(Number(opts.spendLimitUsd)), period: "day" },
       ],
@@ -112,13 +127,20 @@ async function setup(opts: { spendLimitUsd: string; days: string }) {
     chainId: 42220,
   });
 
-  const session = (result as { session?: Session }).session;
-  if (!session) {
-    throw new Error(
-      `grantSession returned no session (status ${JSON.stringify((result as { status?: unknown }).status)})`,
-    );
+  // GrantSessionResult is a Session plus grant metadata.
+  if (result.status !== "granted") {
+    throw new Error(`grantSession failed: ${JSON.stringify(result.legs)}`);
   }
+  const session: Session = result;
   saveSession(session);
+  console.log(`grant tx: ${result.transactionHash ?? "(none)"}`);
+  const legs = [...result.legs, ...(await result.registration), ...(await result.cacheSync)];
+  for (const l of legs) {
+    const leg = l as { kind?: string; chainId?: number; status?: string; transactionHash?: string };
+    console.log(`  leg ${leg.kind}@${leg.chainId}: ${leg.status} ${leg.transactionHash ?? ""}`);
+  }
+  if (result.agentIdentities?.length)
+    console.log("agent identities:", JSON.stringify(result.agentIdentities));
   console.log(
     `session granted: spend cap $${opts.spendLimitUsd}/day USDT, expiry ${opts.days}d`,
   );
@@ -142,9 +164,8 @@ async function status() {
 
 // ----------------------------------------------------------------- call ----
 async function call(invoiceText: string) {
-  const agent = newSelfAgent();
   const session = loadSession();
-  const res = await agent.fetch(`${SELLER_URL}/api/parse`, {
+  const init = {
     method: "POST",
     body: invoiceText,
     headers: {
@@ -152,7 +173,12 @@ async function call(invoiceText: string) {
       "x-tab-wallet": session.walletAddress,
       "x-tab-session-key": session.publicKey,
     },
-  });
+  };
+  // Self signing only when the seller demands it (REQUIRE_SELF=true).
+  const res =
+    process.env.REQUIRE_SELF === "true"
+      ? await newSelfAgent().fetch(`${SELLER_URL}/api/parse`, init)
+      : await fetch(`${SELLER_URL}/api/parse`, init);
   console.log(`HTTP ${res.status}`);
   console.log(await res.text());
 }
@@ -162,8 +188,12 @@ async function settle() {
   const summary = (await (await fetch(`${SELLER_URL}/tab/summary`)).json()) as {
     agents: Record<string, { outstandingUsd: number }>;
   };
-  // The agent's own address (written by the registration flow).
-  const my = readFileSync(".self/agent-address", "utf8").trim().toLowerCase();
+  // Tab identity = the Altana wallet (or the Self agent address if REQUIRE_SELF).
+  const my = (
+    process.env.REQUIRE_SELF === "true"
+      ? readFileSync(".self/agent-address", "utf8")
+      : loadSession().walletAddress
+  ).trim().toLowerCase();
   const mine = summary.agents[my];
   if (!mine || mine.outstandingUsd <= 0) {
     console.log("nothing outstanding; seller summary:", JSON.stringify(summary.agents));
@@ -227,7 +257,11 @@ if (!cmd || !commands[cmd]) {
   console.log("usage: tab-agent <setup|status|call|settle|revoke> [args]");
   process.exit(1);
 }
-commands[cmd]().catch((e: Error) => {
-  console.error("error:", e.message ?? e);
+commands[cmd]().catch((e: unknown) => {
+  const err = e as Record<string, unknown>;
+  console.error("error:", (err as { message?: string }).message ?? String(e));
+  for (const k of ["code", "detail", "relayMessage", "statement", "action"])
+    if (err[k] !== undefined) console.error(`${k}:`, err[k]);
+  if (err.cause) console.error("cause:", err.cause);
   process.exit(1);
 });

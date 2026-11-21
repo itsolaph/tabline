@@ -1,3 +1,4 @@
+import "dotenv/config";
 /**
  * TAB seller server (Hono).
  *
