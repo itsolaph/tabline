@@ -41,6 +41,11 @@ All of these are real transactions from this repo's CLI:
 | Identity record published with its registration entry | [`0x7f7cabc8…779a`](https://celoscan.io/tx/0x7f7cabc873b0706a46a9278940c9b6ca59ae3d5cc42e515375630f5ab848779a) |
 | Second settlement, credited only after the seller read it from chain | [`0xc166e0c3…d7a3`](https://celoscan.io/tx/0xc166e0c366570071b36e966015e41ad890ee939d936ff24b107a85472d61d7a3) |
 
+**Live seller:** the `tab-api` endpoint in the agent's ERC-8004 record
+([`0xb0795ac0…b197`](https://celoscan.io/tx/0xb0795ac0664099f61759dc18b26e742afa86947ad04e04fa35f8b545bff9b197)).
+`GET /` lists the terms and routes; `/api/parse` refuses anyone without a
+live Altana session key and a valid signature by it.
+
 Agent wallet: [`0x5aeC9aC78bb3E045d2f85e311aD3385B8116d0c5`](https://celoscan.io/address/0x5aeC9aC78bb3E045d2f85e311aD3385B8116d0c5)
 · ERC-8004 registry: [`0x8004A169…a432`](https://celoscan.io/address/0x8004A169FB4a3325136EB29fA0ceB6D2e539a432)
 

@@ -292,6 +292,33 @@ app.get("/tab/health", async (c) => {
   return c.json({ ok: true, chainBlock: Number(block) });
 });
 
-serve({ fetch: app.fetch, port: PORT }, (info) => {
+/** What a visitor (or an agent) sees at the root: the terms of service. */
+app.get("/", (c) =>
+  c.json({
+    service: "TAB — net terms for agents",
+    chain: "celo-mainnet (42220)",
+    erc8004AgentId: 10081,
+    terms: {
+      priceUsdPerCall: PRICE_PER_CALL_USD,
+      creditLimitUsd: MAX_OUTSTANDING_USD,
+      settleIn: "USDT",
+      payTo: SELLER_ADDRESS ?? null,
+    },
+    admission: [
+      "x-tab-wallet: your Altana wallet",
+      "x-tab-session-key: the session public key granted on it",
+      "x-tab-ts + x-tab-sig: session-key signature over method, path, body hash, ts",
+    ],
+    routes: {
+      "POST /api/parse": "invoice text -> fields, charged to your tab",
+      "GET /tab/summary": "open tabs",
+      "POST /tab/settle-record": "{agent, txHash} -> credited from onchain Transfer logs",
+      "GET /tab/health": "liveness + chain head",
+    },
+    source: "https://github.com/itsolaph/tabline",
+  }),
+);
+
+serve({ fetch: app.fetch, port: PORT, hostname: process.env.HOST ?? "127.0.0.1" }, (info) => {
   console.log(`[tab-seller] listening on :${info.port} — price/call $${PRICE_PER_CALL_USD}`);
 });
