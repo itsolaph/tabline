@@ -11,6 +11,7 @@ import "dotenv/config";
  *   settle  — pay the outstanding tab in one USDT transfer from the Altana
  *             wallet under the session key, tagged ERC-8021.
  *   revoke  — owner action: revoke the session key (1 tx) — tab access dies.
+ *   register — mint the wallet's ERC-8004 identity and publish its record.
  *
  * Keys come from the environment; nothing is ever committed.
  */
@@ -21,6 +22,14 @@ import {
   CELO,
   serializeSession,
   deserializeSession,
+  registerErc8004Agent,
+  setErc8004AgentUri,
+  getErc8004Agent,
+  encodeErc8004AgentUri,
+  decodeErc8004AgentUri,
+  withErc8004Registration,
+  erc8004Registry,
+  type Erc8004RegistrationFile,
   type Session,
 } from "@altananetwork/sdk";
 import { SelfAgent } from "@selfxyz/agent-sdk";
@@ -238,6 +247,62 @@ async function revoke() {
   );
 }
 
+// ------------------------------------------------------------- register ----
+// ERC-8004 identity for the Altana wallet, in Altana's two phases:
+// mint with an empty `registrations`, then patch the minted id into the record.
+const AGENT_ID_PATH = ".self/erc8004-agent-id.txt";
+
+function tabRecord(): Erc8004RegistrationFile {
+  return {
+    type: "https://eips.ethereum.org/EIPS/eip-8004#registration-v1",
+    name: "TAB",
+    description:
+      "Net terms for agents. Calls run on a tab backed by a capped Altana session key; " +
+      "the tab settles in one ERC-8021-tagged USDT transfer, and revoking the key cuts service in one tx.",
+    services: [
+      { name: "web", endpoint: "https://github.com/itsolaph/tabline" },
+      { name: "tab-api", endpoint: process.env.PUBLIC_SELLER_URL ?? SELLER_URL, version: "0.1.0" },
+    ],
+    registrations: [],
+  };
+}
+
+async function register() {
+  const walletAddress = readFileSync(".self/wallet-address.txt", "utf8").trim() as `0x${string}`;
+  const wallet = { address: walletAddress };
+  const signer = signerFromPrivateKey(requireEnv("OWNER_PRIVATE_KEY") as `0x${string}`);
+  const opts = { network: CELO };
+
+  let agentId: bigint;
+  if (existsSync(AGENT_ID_PATH)) {
+    agentId = BigInt(readFileSync(AGENT_ID_PATH, "utf8").trim());
+    console.log(`reusing agentId ${agentId}`);
+  } else {
+    const minted = await registerErc8004Agent(
+      wallet,
+      signer,
+      { agentUri: encodeErc8004AgentUri(tabRecord()) },
+      opts,
+    );
+    agentId = minted.agentId;
+    writeFileSync(AGENT_ID_PATH, agentId.toString());
+    console.log(`minted agentId ${agentId} — tx ${minted.transactionHash}`);
+  }
+
+  const record = withErc8004Registration(tabRecord(), agentId, CELO.chainId);
+  const set = await setErc8004AgentUri(
+    wallet,
+    signer,
+    { agentId, agentUri: encodeErc8004AgentUri(record) },
+    opts,
+  );
+  console.log(`agent URI set — tx ${set.transactionHash} (${set.status})`);
+
+  const onchain = await getErc8004Agent(CELO, agentId);
+  console.log(`registry ${erc8004Registry(CELO.chainId)} → owner ${onchain.owner}`);
+  console.log(JSON.stringify(decodeErc8004AgentUri(onchain.agentUri).registrations));
+}
+
 // ----------------------------------------------------------------- main ----
 const [cmd, ...args] = process.argv.slice(2);
 const invoiceSample = `Vendor: Sinar Jaya Paper Co
@@ -251,6 +316,7 @@ const commands: Record<string, () => Promise<void>> = {
   call: () => call(args[0] ?? invoiceSample),
   settle,
   revoke,
+  register,
 };
 
 if (!cmd || !commands[cmd]) {

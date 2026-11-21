@@ -49,7 +49,8 @@ export const emptyTab = (): TabRecord => ({
 });
 
 export function outstandingUsd(tab: TabRecord): number {
-  return Math.max(0, tab.chargedUsd - tab.settledUsd);
+  // Round to USDT's 6 decimals so 0.08 - 0.06 reads 0.02, not 0.0200…04.
+  return Math.max(0, Math.round((tab.chargedUsd - tab.settledUsd) * 1e6) / 1e6);
 }
 
 /** The single decision point: should this agent be served on tab? */

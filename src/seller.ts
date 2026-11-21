@@ -1,4 +1,5 @@
 import "dotenv/config";
+import { parseInvoice } from "./invoice.js";
 /**
  * TAB seller server (Hono).
  *
@@ -254,19 +255,6 @@ app.get("/tab/health", async (c) => {
 });
 
 /** Very small demo invoice parser (the "real job" stands in). */
-function parseInvoice(text: string) {
-  const vendor = text.match(/Vendor:\s*(.+)/i)?.[1]?.trim();
-  const total = text.match(/Total:\s*\$?\s*([\d.,]+)/i)?.[1];
-  const date = text.match(/Date:\s*(.+)/i)?.[1]?.trim();
-  const number = text.match(/Invoice\s*#?:?\s*([A-Z0-9-]+)/i)?.[1];
-  return {
-    vendor: vendor ?? null,
-    invoiceNumber: number ?? null,
-    date: date ?? null,
-    totalUsd: total ? Number(total.replace(/,/g, "")) : null,
-  };
-}
-
 serve({ fetch: app.fetch, port: PORT }, (info) => {
   console.log(`[tab-seller] listening on :${info.port} — price/call $${PRICE_PER_CALL_USD}`);
 });
