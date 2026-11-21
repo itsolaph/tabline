@@ -35,6 +35,7 @@ import {
 import { SelfAgent } from "@selfxyz/agent-sdk";
 import { toDataSuffix } from "@celo/attribution-tags";
 import { USDT, RPC_URL, ATTRIB_CODE, usdToBase } from "./config.js";
+import { signRequest } from "./reqsig.js";
 
 const SESSION_PATH = process.env.TAB_SESSION_PATH ?? "./.self/tab-session.json";
 const SELLER_URL = process.env.SELLER_URL ?? "http://127.0.0.1:8791";
@@ -183,6 +184,16 @@ async function call(invoiceText: string) {
       "x-tab-session-key": session.publicKey,
     },
   };
+  // Prove we hold the session key the headers name.
+  Object.assign(
+    init.headers,
+    await signRequest(
+      requireEnv("AGENT_SESSION_KEY") as `0x${string}`,
+      "POST",
+      "/api/parse",
+      invoiceText,
+    ),
+  );
   // Self signing only when the seller demands it (REQUIRE_SELF=true).
   const res =
     process.env.REQUIRE_SELF === "true"

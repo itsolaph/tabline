@@ -1,5 +1,6 @@
 import "dotenv/config";
 import { parseInvoice } from "./invoice.js";
+import { verifyRequest } from "./reqsig.js";
 /**
  * TAB seller server (Hono).
  *
@@ -14,7 +15,7 @@ import { parseInvoice } from "./invoice.js";
 import { serve } from "@hono/node-server";
 import { Hono } from "hono";
 import { getAddress, type Address } from "viem";
-import { PRICE_PER_CALL_USD, PORT, MAX_OUTSTANDING_USD } from "./config.js";
+import { PRICE_PER_CALL_USD, PORT, MAX_OUTSTANDING_USD, USDT, baseToUsd } from "./config.js";
 
 /**
  * Self Agent ID layer is OPTIONAL (env REQUIRE_SELF, default off):
@@ -29,6 +30,7 @@ import { SelfAgentVerifier } from "@selfxyz/agent-sdk";
 import {
   checkAltanaKey,
   publicClient,
+  usdtPaidInTx,
   type AltanaKeyStatus,
 } from "./onchain.js";
 import {
@@ -43,6 +45,7 @@ import {
   recordSettlement,
   bannedNullifiers,
   allTabs,
+  settlementSeen,
 } from "./ledger.js";
 
 const verifier = new SelfAgentVerifier({
@@ -68,6 +71,9 @@ function readTabHeaders(h: Record<string, string>): TabHeaders {
   };
 }
 
+/** Signatures already used (replay guard within the timestamp window). */
+const seenSignatures = new Set<string>();
+
 /** Full admission pipeline shared by every priced route. */
 async function admit(
   rawBody: string,
@@ -79,9 +85,23 @@ async function admit(
   | { ok: false; status: 401 | 402 | 403; body: Record<string, unknown> }
 > {
   const th = readTabHeaders(headers);
+  // The tab headers are public onchain data; only a signature by the named
+  // session key proves the caller holds it.
+  if (th.altanaPubKey) {
+    const sig = await verifyRequest({
+      publicKey: th.altanaPubKey,
+      method,
+      path: url,
+      body: rawBody,
+      ts: headers["x-tab-ts"],
+      sig: headers["x-tab-sig"],
+      seen: seenSignatures,
+    });
+    if (!sig.ok) return { ok: false, status: 401, body: { error: sig.reason } };
+  }
   if (!REQUIRE_SELF) {
     // Altana-key-only admission: no Self signature required.
-    if (!th.altanaWallet) {
+    if (!th.altanaWallet || !th.altanaPubKey) {
       return {
         ok: false,
         status: 401,
@@ -232,20 +252,38 @@ app.get("/tab/summary", (c) => {
   return c.json({ policy: { maxOutstandingUsd: MAX_OUTSTANDING_USD }, agents: out });
 });
 
-/** Agent reports a settlement tx; seller marks the tab paid. */
+/**
+ * Agent reports a settlement tx. The seller reads the tx from chain and
+ * credits the tab with the USDT the agent's wallet actually sent the seller's
+ * payout address in it — the claimed amount is only an upper bound, and each
+ * tx can be credited once.
+ */
+const SELLER_ADDRESS = process.env.SELLER_ADDRESS as Address | undefined;
 app.post("/tab/settle-record", async (c) => {
-  const body = (await c.req.json()) as {
-    agent: string;
-    amountUsd: number;
-    txHash?: string;
-  };
+  const body = (await c.req.json()) as { agent: string; amountUsd: number; txHash?: string };
+  if (!SELLER_ADDRESS) return c.json({ error: "seller_address_not_configured" }, 500);
+  if (!body.txHash || !/^0x[0-9a-fA-F]{64}$/.test(body.txHash))
+    return c.json({ error: "tx_hash_required" }, 400);
+  if (settlementSeen(body.txHash)) return c.json({ error: "tx_already_credited" }, 409);
   const agent = getAddress(body.agent as Address);
   const t = tabFor(agent);
-  const maxSettle = outstandingUsd(t);
-  const amount = Math.min(body.amountUsd, maxSettle);
+  let paidBase: bigint;
+  try {
+    paidBase = await usdtPaidInTx(body.txHash as `0x${string}`, USDT as Address, agent, getAddress(SELLER_ADDRESS));
+  } catch {
+    return c.json({ error: "tx_not_found" }, 404);
+  }
+  const paidUsd = baseToUsd(paidBase);
+  if (paidUsd <= 0) return c.json({ error: "no_payment_in_tx", txHash: body.txHash }, 402);
+  const amount = Math.min(paidUsd, outstandingUsd(t));
   if (amount <= 0) return c.json({ error: "nothing_outstanding" }, 400);
   recordSettlement(agent, amount, body.txHash);
-  return c.json({ ok: true, settledUsd: amount, outstandingUsd: outstandingUsd(tabFor(agent)) });
+  return c.json({
+    ok: true,
+    verifiedOnchainUsd: paidUsd,
+    settledUsd: amount,
+    outstandingUsd: outstandingUsd(tabFor(agent)),
+  });
 });
 
 /** Health: shows what the seller reads from chain right now. */
@@ -254,7 +292,6 @@ app.get("/tab/health", async (c) => {
   return c.json({ ok: true, chainBlock: Number(block) });
 });
 
-/** Very small demo invoice parser (the "real job" stands in). */
 serve({ fetch: app.fetch, port: PORT }, (info) => {
   console.log(`[tab-seller] listening on :${info.port} — price/call $${PRICE_PER_CALL_USD}`);
 });

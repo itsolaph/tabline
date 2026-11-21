@@ -69,3 +69,36 @@ export async function checkAltanaKey(
   }
   return { wallet, publicKey, keyOnAccount, keyStoreValid, expiry };
 }
+
+// ------------------------------------------------------------ settlement ----
+const TRANSFER_TOPIC =
+  "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef" as const;
+
+/**
+ * Read a claimed settlement from chain: how much USDT did `from` actually
+ * send `to` in this transaction? The seller credits the tab with this number,
+ * never with the amount the agent claims. Relay fees paid in the same tx
+ * (transfers to other addresses) are ignored.
+ */
+export async function usdtPaidInTx(
+  txHash: `0x${string}`,
+  token: Address,
+  from: Address,
+  to: Address,
+): Promise<bigint> {
+  const receipt = await publicClient.getTransactionReceipt({ hash: txHash });
+  if (receipt.status !== "success") return 0n;
+  const pad = (a: Address) => `0x${a.slice(2).toLowerCase().padStart(64, "0")}`;
+  let paid = 0n;
+  for (const log of receipt.logs) {
+    if (
+      log.address.toLowerCase() === token.toLowerCase() &&
+      log.topics[0] === TRANSFER_TOPIC &&
+      log.topics[1]?.toLowerCase() === pad(from) &&
+      log.topics[2]?.toLowerCase() === pad(to)
+    ) {
+      paid += BigInt(log.data);
+    }
+  }
+  return paid;
+}

@@ -79,3 +79,9 @@ export function bannedNullifiers(): ReadonlySet<string> {
 export function allTabs(): Record<string, TabRecord> {
   return load().tabs;
 }
+
+/** True if this settlement tx has already been credited to some tab. */
+export function settlementSeen(txHash: string): boolean {
+  const h = txHash.toLowerCase();
+  return load().settlements.some((x) => x.txHash?.toLowerCase() === h);
+}
